@@ -2,9 +2,9 @@ kind: Stack
 name: ffmpeg-stack
 network: ffmpeg-net
 volumes:
-    - ffmpeg-minio_data
+    - "ffmpeg-minio_data"
 services:
-    - name: ffmpeg-minio
+    - name: "ffmpeg-minio"
       image: minio/minio:latest
       command:
           - server
@@ -17,7 +17,7 @@ services:
       mounts:
           - minio_data:/data
 
-    - name: ffmpeg-minio-init
+    - name: "ffmpeg-minio-init"
       image: minio/mc:latest
       command:
           - /bin/sh
@@ -27,7 +27,7 @@ services:
               mc mb --ignore-existing local/uploads
               mc mb --ignore-existing local/outputs
 
-    - name: ffmpeg-backend
+    - name: "ffmpeg-backend"
       image: { { backend_image } }
       env:
           - COLONY_HOST={{ colonies_server }}
@@ -38,12 +38,12 @@ services:
           - MINIO_SECRET_KEY={{ minio_secret_key }}
           - RUST_LOG=info
 
-    - name: ffmpeg-dashboard
+    - name: "ffmpeg-dashboard"
       image: { { dashboard_image } }
       env:
           - VITE_API_URL={{ backend_url }}
 
-    - name: ffmpeg-cloudflare-tunnel
+    - name: "ffmpeg-cloudflare-tunnel"
       image: cloudflare/cloudflared:latest
       command:
           - tunnel
