@@ -9,5 +9,5 @@ RUN touch src/main.rs && cargo build --release
 
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y ca-certificates ffmpeg && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/worker /usr/local/bin/worker
-CMD ["worker"]
+COPY --from=builder /app/target/release/ffmpeg-executor /usr/local/bin/ffmpeg-executor
+CMD ["ffmpeg-executor"]
