@@ -28,7 +28,7 @@ services:
               mc mb --ignore-existing local/outputs
 
     - name: "ffmpeg-backend"
-      image: { { backend_image } }
+      image: {{ backend_image }}
       env:
           - COLONY_HOST={{ colonies_server }}
           - COLONY={{ colony_name }}
@@ -39,7 +39,7 @@ services:
           - RUST_LOG=info
 
     - name: "ffmpeg-dashboard"
-      image: { { dashboard_image } }
+      image: {{ dashboard_image }}
       env:
           - VITE_API_URL={{ backend_url }}
 
