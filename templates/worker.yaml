@@ -1,0 +1,14 @@
+kind: Container
+name: ffmpeg-worker
+image: {{ worker_image }}
+replicas: {{ replicas }}
+env:
+    - COLONY_HOST={{ colonies_server }}
+    - COLONY={{ colony_name }}
+    - COLONY_PRIVATE_KEY={{ colony_prvkey }}
+    - MINIO_ENDPOINT={{ minio_endpoint }}
+    - MINIO_ACCESS_KEY={{ minio_access_key }}
+    - MINIO_SECRET_KEY={{ minio_secret_key }}
+    - MINIO_INPUT_BUCKET=uploads
+    - MINIO_OUTPUT_BUCKET=outputs
+    - RUST_LOG=info

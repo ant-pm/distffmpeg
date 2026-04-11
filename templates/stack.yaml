@@ -1,0 +1,52 @@
+kind: Stack
+name: ffmpeg-stack
+network: ffmpeg-net
+volumes:
+    - minio_data
+services:
+    - name: minio
+      image: minio/minio:latest
+      command:
+          - server
+          - /data
+          - --console-address
+          - ":9001"
+      env:
+          - MINIO_ROOT_USER={{ minio_access_key }}
+          - MINIO_ROOT_PASSWORD={{ minio_secret_key }}
+      mounts:
+          - minio_data:/data
+
+    - name: minio-init
+      image: minio/mc:latest
+      command:
+          - /bin/sh
+          - -c
+          - |
+              until mc alias set local http://minio:9000 {{ minio_access_key }} {{ minio_secret_key }}; do sleep 1; done
+              mc mb --ignore-existing local/uploads
+              mc mb --ignore-existing local/outputs
+
+    - name: backend
+      image: {{ backend_image }}
+      env:
+          - COLONY_HOST={{ colonies_server }}
+          - COLONY={{ colony_name }}
+          - COLONY_PRIVATE_KEY={{ colony_prvkey }}
+          - MINIO_PUBLIC_ENDPOINT={{ minio_endpoint }}
+          - MINIO_ACCESS_KEY={{ minio_access_key }}
+          - MINIO_SECRET_KEY={{ minio_secret_key }}
+          - RUST_LOG=info
+
+    - name: dashboard
+      image: {{ dashboard_image }}
+      env:
+          - VITE_API_URL={{ backend_url }}
+
+    - name: cloudflare-tunnel
+      image: cloudflare/cloudflared:latest
+      command:
+          - tunnel
+          - run
+      env:
+          - TUNNEL_TOKEN={{ tunnel_token }}

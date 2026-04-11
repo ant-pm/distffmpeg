@@ -1,0 +1,12 @@
+tunnel_token: ""
+colonies_server: ""
+colony_name: ""
+colony_prvkey: ""
+minio_endpoint: ""
+minio_access_key: ""
+minio_secret_key: ""
+backend_url: ""
+backend_image: ""
+dashboard_image: ""
+worker_image: ""
+replicas: 1
