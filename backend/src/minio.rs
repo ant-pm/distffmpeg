@@ -29,6 +29,13 @@ pub async fn create_public_client() -> Client {
     make_client(&endpoint)
 }
 
+/// Client whose presigned URLs use the internal Docker network endpoint (for server-side use).
+pub async fn create_internal_client() -> Client {
+    let endpoint = env::var("MINIO_ENDPOINT")
+        .unwrap_or_else(|_| "http://localhost:9000".into());
+    make_client(&endpoint)
+}
+
 fn presign_config() -> PresigningConfig {
     PresigningConfig::builder()
         .expires_in(Duration::from_secs(3600))

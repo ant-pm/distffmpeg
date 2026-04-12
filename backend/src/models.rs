@@ -63,6 +63,8 @@ pub struct Job {
     pub created_at: DateTime<Utc>,
     pub error: Option<String>,
     pub progress: Option<f32>,
+    pub chunk_count: Option<u32>,
+    pub chunks_completed: u32,
 }
 
 #[derive(Debug, Deserialize)]

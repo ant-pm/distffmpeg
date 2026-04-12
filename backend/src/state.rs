@@ -9,6 +9,8 @@ use uuid::Uuid;
 pub struct AppState {
     /// S3 client whose presigned URLs use the public-facing endpoint (browser-accessible).
     pub s3_public: Client,
+    /// S3 client using the internal Docker network endpoint (for server-side ffprobe etc.).
+    pub s3_internal: Client,
     pub jobs: Arc<RwLock<HashMap<Uuid, Job>>>,
     pub client_broadcast: broadcast::Sender<ClientMessage>,
     pub colony_name: String,
@@ -16,10 +18,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(s3_public: Client) -> Self {
+    pub fn new(s3_public: Client, s3_internal: Client) -> Self {
         let (client_broadcast, _) = broadcast::channel(256);
         Self {
             s3_public,
+            s3_internal,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             client_broadcast,
             colony_name: std::env::var("COLONY").expect("COLONY not set"),

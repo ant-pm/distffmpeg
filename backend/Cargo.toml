@@ -19,3 +19,4 @@ aws-credential-types = "1"
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 colonyos = "1.0.5"
+anyhow = "1"

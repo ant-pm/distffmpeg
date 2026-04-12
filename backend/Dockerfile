@@ -8,7 +8,7 @@ COPY src/ src/
 RUN touch src/main.rs && cargo build --release
 
 FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates ffmpeg && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/backend /usr/local/bin/backend
 EXPOSE 3000
 CMD ["backend"]

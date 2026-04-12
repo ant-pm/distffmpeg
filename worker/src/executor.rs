@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{Client, Config, config::Region, primitives::ByteStream};
 use colonyos::core::{Executor, Software};
@@ -9,10 +9,19 @@ use tokio::{process::Command, signal};
 // ── Job types ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct TranscodeJob {
+struct TranscodeChunkJob {
     input_key: String,
+    start_time: f64,
+    duration: f64,
     output_key: String,
     encoding: EncodingOptions,
+}
+
+#[derive(Debug, Deserialize)]
+struct MergeChunksJob {
+    chunk_keys: Vec<String>,
+    output_key: String,
+    output_format: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,10 +91,8 @@ pub async fn run_executor() -> Result<()> {
 
 async fn run_loop(colony_name: &str, exec_prvkey: &str) -> Result<()> {
     let s3 = minio_client();
-    let input_bucket =
-        std::env::var("MINIO_INPUT_BUCKET").unwrap_or_else(|_| "uploads".into());
-    let output_bucket =
-        std::env::var("MINIO_OUTPUT_BUCKET").unwrap_or_else(|_| "outputs".into());
+    let input_bucket = std::env::var("MINIO_INPUT_BUCKET").unwrap_or_else(|_| "uploads".into());
+    let output_bucket = std::env::var("MINIO_OUTPUT_BUCKET").unwrap_or_else(|_| "outputs".into());
 
     loop {
         tokio::select! {
@@ -101,14 +108,22 @@ async fn run_loop(colony_name: &str, exec_prvkey: &str) -> Result<()> {
                         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     }
                     Ok(process) => {
-                        tracing::info!("Assigned: {}", process.processid);
+                        tracing::info!("Assigned: {} ({})", process.processid, process.spec.funcname);
                         let s3 = s3.clone();
                         let input_bucket = input_bucket.clone();
                         let output_bucket = output_bucket.clone();
                         let exec_prvkey = exec_prvkey.to_string();
                         tokio::spawn(async move {
                             let kwargs = serde_json::to_value(&process.spec.kwargs).unwrap();
-                            let res = handle_job(&s3, &input_bucket, &output_bucket, &kwargs).await;
+                            let res = match process.spec.funcname.as_str() {
+                                "transcode_chunk" => {
+                                    handle_transcode_chunk(&s3, &input_bucket, &output_bucket, &kwargs).await
+                                }
+                                "merge_chunks" => {
+                                    handle_merge_chunks(&s3, &output_bucket, &kwargs).await
+                                }
+                                other => Err(anyhow!("unknown function: {other}")),
+                            };
                             match res {
                                 Ok(output_key) => {
                                     if let Err(e) = colonyos::set_output(
@@ -126,7 +141,7 @@ async fn run_loop(colony_name: &str, exec_prvkey: &str) -> Result<()> {
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::error!("Job failed: {e:#}");
+                                    tracing::error!("Process {} failed: {e:#}", process.processid);
                                     let _ = colonyos::fail(&process.processid, &exec_prvkey).await;
                                 }
                             }
@@ -138,15 +153,15 @@ async fn run_loop(colony_name: &str, exec_prvkey: &str) -> Result<()> {
     }
 }
 
-// ── Job handler ───────────────────────────────────────────────────────────────
+// ── Chunk transcoding ─────────────────────────────────────────────────────────
 
-async fn handle_job(
+async fn handle_transcode_chunk(
     s3: &Client,
     input_bucket: &str,
     output_bucket: &str,
     kwargs: &serde_json::Value,
 ) -> Result<String> {
-    let job: TranscodeJob = serde_json::from_value(kwargs.clone())?;
+    let job: TranscodeChunkJob = serde_json::from_value(kwargs.clone())?;
 
     let input_ext = job.input_key.rsplit('.').next().unwrap_or("mp4");
     let output_ext = job.output_key.rsplit('.').next().unwrap_or("mp4");
@@ -156,31 +171,32 @@ async fn handle_job(
     let output_path = tmp.path().join(format!("output.{output_ext}"));
 
     // Download input from MinIO
-    let resp = s3
-        .get_object()
-        .bucket(input_bucket)
-        .key(&job.input_key)
-        .send()
-        .await?;
+    let resp = s3.get_object().bucket(input_bucket).key(&job.input_key).send().await?;
     let bytes = resp.body.collect().await?.into_bytes();
     tokio::fs::write(&input_path, bytes).await?;
 
-    // Run ffmpeg
-    let ffmpeg_args = build_ffmpeg_args(
-        input_path.to_str().unwrap(),
-        output_path.to_str().unwrap(),
-        &job.encoding,
-    );
-    tracing::info!("Running: ffmpeg {}", ffmpeg_args.join(" "));
+    // Seek to keyframe-aligned start before -i, then limit output duration with -t.
+    // -avoid_negative_ts make_zero resets timestamps so the chunk starts at 0.
+    let mut args = vec![
+        "-ss".into(), format!("{:.6}", job.start_time),
+        "-i".into(), input_path.to_str().unwrap().to_string(),
+        "-t".into(), format!("{:.6}", job.duration),
+        "-y".into(),
+    ];
+    args.extend(build_encoding_flags(&job.encoding));
+    args.extend([
+        "-avoid_negative_ts".into(), "make_zero".into(),
+        output_path.to_str().unwrap().to_string(),
+    ]);
 
-    let output = Command::new("ffmpeg").args(&ffmpeg_args).output().await?;
+    tracing::info!("Chunk {}: ffmpeg {}", job.output_key, args.join(" "));
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("{}", extract_ffmpeg_errors(&stderr)));
+    let out = Command::new("ffmpeg").args(&args).output().await?;
+    if !out.status.success() {
+        return Err(anyhow!("{}", extract_ffmpeg_errors(&String::from_utf8_lossy(&out.stderr))));
     }
 
-    // Upload output to MinIO
+    // Upload chunk
     let out_bytes = tokio::fs::read(&output_path).await?;
     s3.put_object()
         .bucket(output_bucket)
@@ -192,10 +208,78 @@ async fn handle_job(
     Ok(job.output_key)
 }
 
-// ── FFmpeg arg builder ────────────────────────────────────────────────────────
+// ── Chunk merging ─────────────────────────────────────────────────────────────
 
-fn build_ffmpeg_args(input: &str, output: &str, enc: &EncodingOptions) -> Vec<String> {
-    let mut args = vec!["-i".into(), input.into(), "-y".into()];
+async fn handle_merge_chunks(
+    s3: &Client,
+    output_bucket: &str,
+    kwargs: &serde_json::Value,
+) -> Result<String> {
+    let job: MergeChunksJob = serde_json::from_value(kwargs.clone())?;
+
+    let tmp = tempdir()?;
+    let mut chunk_paths = Vec::with_capacity(job.chunk_keys.len());
+
+    // Download all chunks
+    for (i, chunk_key) in job.chunk_keys.iter().enumerate() {
+        let resp = s3.get_object().bucket(output_bucket).key(chunk_key).send().await?;
+        let bytes = resp.body.collect().await?.into_bytes();
+        let path = tmp.path().join(format!("chunk_{i:04}.{}", job.output_format));
+        tokio::fs::write(&path, &bytes).await?;
+        chunk_paths.push(path);
+    }
+
+    // Write concat manifest (absolute paths, safe=0 allows them)
+    let manifest_path = tmp.path().join("list.txt");
+    let manifest = chunk_paths
+        .iter()
+        .map(|p| format!("file '{}'\n", p.to_str().unwrap()))
+        .collect::<String>();
+    tokio::fs::write(&manifest_path, manifest).await?;
+
+    // Concat with stream copy — chunks are already transcoded
+    let output_path = tmp.path().join(format!("output.{}", job.output_format));
+    let out = Command::new("ffmpeg")
+        .args([
+            "-f", "concat",
+            "-safe", "0",
+            "-i", manifest_path.to_str().unwrap(),
+            "-c", "copy",
+            "-y",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .await?;
+
+    if !out.status.success() {
+        return Err(anyhow!("{}", extract_ffmpeg_errors(&String::from_utf8_lossy(&out.stderr))));
+    }
+
+    // Upload final output
+    let out_bytes = tokio::fs::read(&output_path).await?;
+    s3.put_object()
+        .bucket(output_bucket)
+        .key(&job.output_key)
+        .body(ByteStream::from(out_bytes))
+        .send()
+        .await?;
+
+    // Clean up intermediate chunks from MinIO
+    for chunk_key in &job.chunk_keys {
+        let _ = s3.delete_object()
+            .bucket(output_bucket)
+            .key(chunk_key)
+            .send()
+            .await;
+    }
+
+    Ok(job.output_key)
+}
+
+// ── FFmpeg helpers ────────────────────────────────────────────────────────────
+
+fn build_encoding_flags(enc: &EncodingOptions) -> Vec<String> {
+    let mut args = Vec::new();
 
     match &enc.video_codec {
         VideoCodec::H264 => args.extend([
@@ -235,7 +319,6 @@ fn build_ffmpeg_args(input: &str, output: &str, enc: &EncodingOptions) -> Vec<St
         args.extend(["-vf".into(), format!("scale={res}")]);
     }
 
-    args.push(output.into());
     args
 }
 
@@ -271,8 +354,6 @@ fn vp9_speed(p: &Preset) -> &'static str {
 
 // ── Error extraction ──────────────────────────────────────────────────────────
 
-/// Filter ffmpeg stderr to the lines that describe the actual error,
-/// discarding version headers, codec init info, and progress stats.
 fn extract_ffmpeg_errors(stderr: &str) -> String {
     let is_noise = |line: &str| -> bool {
         if line.starts_with("ffmpeg version") { return true; }
@@ -295,7 +376,6 @@ fn extract_ffmpeg_errors(stderr: &str) -> String {
         line.trim().is_empty()
     };
 
-    // Strip hex addresses from bracket tags: "[foo @ 0x1a2b3c]" → "[foo]"
     let clean = |line: &str| -> String {
         let mut out = String::with_capacity(line.len());
         let mut rest = line;

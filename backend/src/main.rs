@@ -19,7 +19,8 @@ async fn main() {
     colonyos::set_server_url(&format!("https://{colony_host}/api"));
 
     let s3_public = minio::create_public_client().await;
-    let app_state = state::AppState::new(s3_public);
+    let s3_internal = minio::create_internal_client().await;
+    let app_state = state::AppState::new(s3_public, s3_internal);
 
     let app = Router::new()
         .route("/api/jobs", post(routes::create_job))

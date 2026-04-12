@@ -38,6 +38,7 @@ services:
           - COLONY={{ colony_name }}
           - COLONY_PRIVATE_KEY={{ colony_prvkey }}
           - MINIO_PUBLIC_ENDPOINT={{ minio_endpoint }}
+          - MINIO_ENDPOINT=http://ffmpeg-minio:9000
           - MINIO_ACCESS_KEY={{ minio_access_key }}
           - MINIO_SECRET_KEY={{ minio_secret_key }}
           - RUST_LOG=info
