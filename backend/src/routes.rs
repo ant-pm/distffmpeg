@@ -78,21 +78,24 @@ pub async fn mark_uploaded(
     let _ = state.client_broadcast.send(ClientMessage::JobUpdate { job: job_clone.clone() });
 
     let state2 = state.clone();
+    let output_format = job_clone.output_format.clone();
+    let encoding = job_clone.encoding.clone();
+    let job_id = job_clone.id;
     tokio::spawn(async move {
         if let Err(e) = orchestrate_job(
             state2.clone(),
-            job_clone.id,
+            job_id,
             input_key,
             final_output_key,
             probe_url,
-            job_clone.output_format.clone(),
-            job_clone.encoding.clone(),
+            output_format,
+            encoding,
         )
         .await
         {
-            tracing::error!("Job {} failed: {e:#}", job_clone.id);
+            tracing::error!("Job {job_id} failed: {e:#}");
             let mut jobs = state2.jobs.write().await;
-            if let Some(j) = jobs.get_mut(&job_clone.id) {
+            if let Some(j) = jobs.get_mut(&job_id) {
                 j.status = JobStatus::Failed;
                 j.error = Some(e.to_string());
                 let _ = state2.client_broadcast.send(ClientMessage::JobUpdate { job: j.clone() });
@@ -154,7 +157,7 @@ async fn orchestrate_job(
     }
 
     // Submit one ColonyOS process per chunk
-    let mut proc_ids = Vec::with_capacity(chunks.len());
+    let mut procs = Vec::with_capacity(chunks.len());
     let mut chunk_keys = Vec::with_capacity(chunks.len());
 
     for (i, (start, end)) in chunks.iter().enumerate() {
@@ -175,7 +178,7 @@ async fn orchestrate_job(
             .await
             .map_err(|e| anyhow::anyhow!("submit chunk {i}: {e}"))?;
 
-        proc_ids.push(proc.processid);
+        procs.push(proc);
         chunk_keys.push(chunk_key);
     }
 
@@ -183,12 +186,12 @@ async fn orchestrate_job(
     let completed = Arc::new(AtomicU32::new(0));
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<(), String>>(total as usize);
 
-    for proc_id in proc_ids {
+    for proc in procs {
         let prvkey = state.colony_prvkey.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
             let result = colonyos::subscribe_process(
-                &proc_id,
+                &proc,
                 colonyos::core::SUCCESS,
                 3600,
                 &prvkey,
@@ -231,7 +234,7 @@ async fn orchestrate_job(
         .map_err(|e| anyhow::anyhow!("submit merge: {e}"))?;
 
     colonyos::subscribe_process(
-        &merge_proc.processid,
+        &merge_proc,
         colonyos::core::SUCCESS,
         7200,
         &state.colony_prvkey,
