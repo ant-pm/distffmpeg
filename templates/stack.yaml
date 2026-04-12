@@ -18,12 +18,16 @@ services:
           - minio_data:/data
 
     - name: "ffmpeg-minio-init"
-      image: minio/mc:latest
+      image: alpine:latest
       command:
           - /bin/sh
           - -c
           - |
-              until mc alias set local http://minio:9000 {{ minio_access_key }} {{ minio_secret_key }}; do sleep 1; done
+              apk add --no-cache curl
+              until curl -sf http://ffmpeg-minio:9000/minio/health/live; do sleep 2; done
+              curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+              chmod +x /usr/local/bin/mc
+              mc alias set local http://ffmpeg-minio:9000 {{ minio_access_key }} {{ minio_secret_key }}
               mc mb --ignore-existing local/uploads
               mc mb --ignore-existing local/outputs
 
