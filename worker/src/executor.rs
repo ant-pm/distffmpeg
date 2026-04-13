@@ -10,7 +10,7 @@ use tokio::{process::Command, signal};
 
 #[derive(Debug, Deserialize)]
 struct TranscodeChunkJob {
-    input_key: String,
+    input_url: String,
     start_time: f64,
     duration: f64,
     output_key: String,
@@ -19,7 +19,7 @@ struct TranscodeChunkJob {
 
 #[derive(Debug, Deserialize)]
 struct MergeChunksJob {
-    chunk_keys: Vec<String>,
+    chunk_urls: Vec<String>,
     output_key: String,
     output_format: String,
 }
@@ -109,43 +109,37 @@ async fn run_loop(colony_name: &str, exec_prvkey: &str) -> Result<()> {
                     }
                     Ok(process) => {
                         tracing::info!("Assigned: {} ({})", process.processid, process.spec.funcname);
-                        let s3 = s3.clone();
-                        let input_bucket = input_bucket.clone();
-                        let output_bucket = output_bucket.clone();
-                        let exec_prvkey = exec_prvkey.to_string();
-                        tokio::spawn(async move {
-                            let kwargs = serde_json::to_value(&process.spec.kwargs).unwrap();
-                            let res = match process.spec.funcname.as_str() {
-                                "transcode_chunk" => {
-                                    handle_transcode_chunk(&s3, &input_bucket, &output_bucket, &kwargs).await
-                                }
-                                "merge_chunks" => {
-                                    handle_merge_chunks(&s3, &output_bucket, &kwargs).await
-                                }
-                                other => Err(anyhow!("unknown function: {other}")),
-                            };
-                            match res {
-                                Ok(output_key) => {
-                                    if let Err(e) = colonyos::set_output(
-                                        &process.processid,
-                                        vec![output_key],
-                                        &exec_prvkey,
-                                    ).await {
-                                        tracing::error!("set_output failed: {e}");
-                                    } else if let Err(e) =
-                                        colonyos::close(&process.processid, &exec_prvkey).await
-                                    {
-                                        tracing::error!("close failed: {e}");
-                                    } else {
-                                        tracing::info!("Process {} done", process.processid);
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!("Process {} failed: {e:#}", process.processid);
-                                    let _ = colonyos::fail(&process.processid, &exec_prvkey).await;
+                        let kwargs = serde_json::to_value(&process.spec.kwargs).unwrap();
+                        let res = match process.spec.funcname.as_str() {
+                            "transcode_chunk" => {
+                                handle_transcode_chunk(&s3, &input_bucket, &output_bucket, &kwargs).await
+                            }
+                            "merge_chunks" => {
+                                handle_merge_chunks(&s3, &output_bucket, &kwargs).await
+                            }
+                            other => Err(anyhow!("unknown function: {other}")),
+                        };
+                        match res {
+                            Ok(output_key) => {
+                                if let Err(e) = colonyos::set_output(
+                                    &process.processid,
+                                    vec![output_key],
+                                    &exec_prvkey,
+                                ).await {
+                                    tracing::error!("set_output failed: {e}");
+                                } else if let Err(e) =
+                                    colonyos::close(&process.processid, &exec_prvkey).await
+                                {
+                                    tracing::error!("close failed: {e}");
+                                } else {
+                                    tracing::info!("Process {} done", process.processid);
                                 }
                             }
-                        });
+                            Err(e) => {
+                                tracing::error!("Process {} failed: {e:#}", process.processid);
+                                let _ = colonyos::fail(&process.processid, &exec_prvkey).await;
+                            }
+                        }
                     }
                 }
             }
@@ -157,29 +151,22 @@ async fn run_loop(colony_name: &str, exec_prvkey: &str) -> Result<()> {
 
 async fn handle_transcode_chunk(
     s3: &Client,
-    input_bucket: &str,
+    _input_bucket: &str,
     output_bucket: &str,
     kwargs: &serde_json::Value,
 ) -> Result<String> {
     let job: TranscodeChunkJob = serde_json::from_value(kwargs.clone())?;
 
-    let input_ext = job.input_key.rsplit('.').next().unwrap_or("mp4");
     let output_ext = job.output_key.rsplit('.').next().unwrap_or("mp4");
 
     let tmp = tempdir()?;
-    let input_path = tmp.path().join(format!("input.{input_ext}"));
     let output_path = tmp.path().join(format!("output.{output_ext}"));
 
-    // Download input from MinIO
-    let resp = s3.get_object().bucket(input_bucket).key(&job.input_key).send().await?;
-    let bytes = resp.body.collect().await?.into_bytes();
-    tokio::fs::write(&input_path, bytes).await?;
-
-    // Seek to keyframe-aligned start before -i, then limit output duration with -t.
-    // -avoid_negative_ts make_zero resets timestamps so the chunk starts at 0.
+    // Feed the presigned URL directly to ffmpeg — no download needed.
+    // ffmpeg seeks via HTTP range requests, so only the relevant bytes are fetched.
     let mut args = vec![
         "-ss".into(), format!("{:.6}", job.start_time),
-        "-i".into(), input_path.to_str().unwrap().to_string(),
+        "-i".into(), job.input_url.clone(),
         "-t".into(), format!("{:.6}", job.duration),
         "-y".into(),
     ];
@@ -189,14 +176,14 @@ async fn handle_transcode_chunk(
         output_path.to_str().unwrap().to_string(),
     ]);
 
-    tracing::info!("Chunk {}: ffmpeg {}", job.output_key, args.join(" "));
+    tracing::info!("Chunk {}: ffmpeg -ss {:.1} -i <url> -t {:.1} ...", job.output_key, job.start_time, job.duration);
 
     let out = Command::new("ffmpeg").args(&args).output().await?;
     if !out.status.success() {
         return Err(anyhow!("{}", extract_ffmpeg_errors(&String::from_utf8_lossy(&out.stderr))));
     }
 
-    // Upload chunk
+    // Upload transcoded chunk to MinIO
     let out_bytes = tokio::fs::read(&output_path).await?;
     s3.put_object()
         .bucket(output_bucket)
@@ -218,31 +205,23 @@ async fn handle_merge_chunks(
     let job: MergeChunksJob = serde_json::from_value(kwargs.clone())?;
 
     let tmp = tempdir()?;
-    let mut chunk_paths = Vec::with_capacity(job.chunk_keys.len());
 
-    // Download all chunks
-    for (i, chunk_key) in job.chunk_keys.iter().enumerate() {
-        let resp = s3.get_object().bucket(output_bucket).key(chunk_key).send().await?;
-        let bytes = resp.body.collect().await?.into_bytes();
-        let path = tmp.path().join(format!("chunk_{i:04}.{}", job.output_format));
-        tokio::fs::write(&path, &bytes).await?;
-        chunk_paths.push(path);
-    }
-
-    // Write concat manifest (absolute paths, safe=0 allows them)
+    // Write concat manifest using presigned HTTP URLs — no S3 download needed.
+    // ffmpeg's concat demuxer supports HTTP sources directly.
     let manifest_path = tmp.path().join("list.txt");
-    let manifest = chunk_paths
-        .iter()
-        .map(|p| format!("file '{}'\n", p.to_str().unwrap()))
+    let manifest = job.chunk_urls.iter()
+        .map(|url| format!("file '{}'\n", url))
         .collect::<String>();
     tokio::fs::write(&manifest_path, manifest).await?;
 
-    // Concat with stream copy — chunks are already transcoded
+    // Concat with stream copy — chunks are already transcoded.
+    // -protocol_whitelist is required for ffmpeg to allow HTTP(S) sources in the manifest.
     let output_path = tmp.path().join(format!("output.{}", job.output_format));
     let out = Command::new("ffmpeg")
         .args([
             "-f", "concat",
             "-safe", "0",
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
             "-i", manifest_path.to_str().unwrap(),
             "-c", "copy",
             "-y",
@@ -263,15 +242,6 @@ async fn handle_merge_chunks(
         .body(ByteStream::from(out_bytes))
         .send()
         .await?;
-
-    // Clean up intermediate chunks from MinIO
-    for chunk_key in &job.chunk_keys {
-        let _ = s3.delete_object()
-            .bucket(output_bucket)
-            .key(chunk_key)
-            .send()
-            .await;
-    }
 
     Ok(job.output_key)
 }

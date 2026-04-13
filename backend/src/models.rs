@@ -12,6 +12,22 @@ pub enum JobStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChunkStatus {
+    Queued,
+    Running,
+    Done,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkInfo {
+    pub index: u32,
+    pub status: ChunkStatus,
+    pub worker: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoCodec {
@@ -47,9 +63,7 @@ pub struct EncodingOptions {
     pub video_codec: VideoCodec,
     pub audio_codec: AudioCodec,
     pub preset: Preset,
-    /// Constant Rate Factor (0-51 for x264/x265, 0-63 for AV1/VP9). Lower = better quality, bigger file.
     pub crf: u8,
-    /// Target resolution, e.g. "1920x1080", "1280x720". None keeps original.
     pub resolution: Option<String>,
 }
 
@@ -61,10 +75,13 @@ pub struct Job {
     pub encoding: EncodingOptions,
     pub status: JobStatus,
     pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
     pub error: Option<String>,
     pub progress: Option<f32>,
     pub chunk_count: Option<u32>,
     pub chunks_completed: u32,
+    pub chunks: Vec<ChunkInfo>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,7 +102,6 @@ pub struct DownloadResponse {
     pub download_url: String,
 }
 
-/// Messages sent from backend to client dashboard
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ClientMessage {

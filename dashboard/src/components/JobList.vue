@@ -48,19 +48,60 @@
             <span class="text-xs text-muted-foreground">Resolution</span>
             <span class="font-mono text-xs text-foreground">{{ job.encoding.resolution.replace(':', '×') }}</span>
           </div>
+
+          <!-- Timing -->
+          <div v-if="job.started_at" class="flex items-center justify-between">
+            <span class="text-xs text-muted-foreground">Time</span>
+            <span class="font-mono text-xs" :class="job.status === 'processing' ? 'text-amber-400' : 'text-foreground'">
+              {{ elapsed(job) }}
+            </span>
+          </div>
         </div>
 
         <!-- Progress bar -->
         <div v-if="job.status === 'processing'" class="mt-3">
           <div class="mb-1 flex items-center justify-between">
-            <span class="text-xs text-muted-foreground">Encoding</span>
-            <span class="font-mono text-xs text-amber-400">{{ Math.round(job.progress ?? 0) }}%</span>
+            <span class="text-xs text-muted-foreground">
+              {{ job.chunks_completed === job.chunk_count ? 'Merging' : 'Encoding' }}
+            </span>
+            <span class="font-mono text-xs text-amber-400">
+              <template v-if="job.chunk_count">
+                {{ job.chunks_completed }} / {{ job.chunk_count }} chunks
+              </template>
+              <template v-else>—</template>
+            </span>
           </div>
           <div class="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
             <div
               class="h-full rounded-full bg-amber-400 transition-all duration-300"
-              :style="{ width: `${job.progress ?? 0}%` }"
+              :style="{ width: `${(job.progress ?? 0) * 100}%` }"
             />
+          </div>
+        </div>
+
+        <!-- Chunk grid -->
+        <div v-if="job.chunks && job.chunks.length > 0" class="mt-3">
+          <div class="mb-1.5 text-xs text-muted-foreground">Chunks</div>
+          <div class="flex flex-wrap gap-1">
+            <div
+              v-for="chunk in job.chunks"
+              :key="chunk.index"
+              class="h-4 w-4 rounded-sm transition-colors"
+              :class="chunkColor(chunk.status)"
+              :title="chunkTitle(chunk)"
+            />
+          </div>
+
+          <!-- Worker summary -->
+          <div v-if="workerSummary(job).length > 0" class="mt-2 space-y-0.5">
+            <div
+              v-for="w in workerSummary(job)"
+              :key="w.name"
+              class="flex items-center justify-between"
+            >
+              <span class="truncate font-mono text-xs text-muted-foreground">{{ w.name }}</span>
+              <span class="ml-2 shrink-0 font-mono text-xs text-foreground">{{ w.count }} chunk{{ w.count !== 1 ? 's' : '' }}</span>
+            </div>
           </div>
         </div>
 
@@ -80,6 +121,7 @@
 </template>
 
 <script setup>
+import { ref, onMounted, onUnmounted } from 'vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Download } from 'lucide-vue-next'
@@ -87,6 +129,11 @@ import { Download } from 'lucide-vue-next'
 defineProps({
   jobs: { type: Array, required: true },
 })
+
+const now = ref(Date.now())
+let timer = null
+onMounted(() => { timer = setInterval(() => { now.value = Date.now() }, 1000) })
+onUnmounted(() => clearInterval(timer))
 
 function statusVariant(s) {
   return { pending_upload: 'secondary', queued: 'info', processing: 'warning', completed: 'success', failed: 'destructive' }[s] ?? 'secondary'
@@ -105,6 +152,41 @@ function timeAgo(iso) {
   if (secs < 60) return `${secs}s ago`
   if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
   return `${Math.floor(secs / 3600)}h ago`
+}
+
+function elapsed(job) {
+  if (!job.started_at) return null
+  const end = job.finished_at ? new Date(job.finished_at).getTime() : now.value
+  const secs = Math.max(0, Math.floor((end - new Date(job.started_at).getTime()) / 1000))
+  const m = Math.floor(secs / 60)
+  const s = secs % 60
+  return m > 0 ? `${m}m ${s}s` : `${s}s`
+}
+
+function chunkColor(status) {
+  return {
+    queued:  'bg-white/15',
+    running: 'bg-amber-400 animate-pulse',
+    done:    'bg-green-500',
+    failed:  'bg-red-500',
+  }[status] ?? 'bg-white/10'
+}
+
+function chunkTitle(chunk) {
+  const base = `Chunk ${chunk.index} — ${chunk.status}`
+  return chunk.worker ? `${base}\n${chunk.worker}` : base
+}
+
+function workerSummary(job) {
+  const counts = {}
+  for (const chunk of job.chunks ?? []) {
+    if (chunk.worker) {
+      counts[chunk.worker] = (counts[chunk.worker] ?? 0) + 1
+    }
+  }
+  return Object.entries(counts)
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count)
 }
 
 async function download(job) {
